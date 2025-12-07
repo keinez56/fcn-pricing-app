@@ -1,0 +1,518 @@
+"""
+FCN 報價預測 API
+================
+基於 FastAPI 的後端服務，整合我們訓練的機器學習模型
+"""
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import List, Optional
+import pandas as pd
+import numpy as np
+import joblib
+import os
+from datetime import datetime
+
+# 初始化 FastAPI
+app = FastAPI(
+    title="FCN 報價預測 API",
+    description="使用機器學習模型預測 FCN (Fixed Coupon Note) 年化收益率",
+    version="1.0.0"
+)
+
+# CORS 設定
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 開發環境允許所有來源
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============================================================================
+# 全域變數和模型載入
+# ============================================================================
+
+MODEL_PATH = "models/fcn_model_histgradient_boosting_deep.pkl"
+FEATURES_PATH = "models/model_features.txt"
+IV_DATA_PATH = "data/iv_data"
+
+model = None
+feature_cols = []
+iv_cache = {}
+
+
+def load_model():
+    """載入模型和特徵列表"""
+    global model, feature_cols
+
+    if os.path.exists(MODEL_PATH):
+        model = joblib.load(MODEL_PATH)
+        print(f"✅ 模型載入成功: {MODEL_PATH}")
+    else:
+        print(f"❌ 找不到模型檔案: {MODEL_PATH}")
+        model = None
+
+    if os.path.exists(FEATURES_PATH):
+        with open(FEATURES_PATH, 'r') as f:
+            feature_cols = [line.strip() for line in f.readlines()]
+        print(f"✅ 特徵列表載入成功: {len(feature_cols)} 個特徵")
+    else:
+        print(f"❌ 找不到特徵列表: {FEATURES_PATH}")
+        feature_cols = []
+
+
+def load_iv_data(date_key: str) -> pd.DataFrame:
+    """載入指定日期的IV資料"""
+    global iv_cache
+
+    if date_key in iv_cache:
+        return iv_cache[date_key]
+
+    iv_file = os.path.join(IV_DATA_PATH, f'{date_key}.xlsx')
+
+    if not os.path.exists(iv_file):
+        raise FileNotFoundError(f"找不到IV資料檔案: {iv_file}")
+
+    df_iv = pd.read_excel(iv_file)
+
+    # 跳過標題行 (中文標題)
+    df_iv = df_iv.iloc[1:].reset_index(drop=True)
+
+    # 重命名列 - 根據實際 Bloomberg 數據列名
+    column_mapping = {
+        'Unnamed: 0': 'BBG_Code',
+        'PX_LAST': 'PX_LAST',
+        '3MO_PUT_IMP_VOL': 'PUT_IMP_VOL_3M',
+        '2M_CALL_IMP_VOL_25DELTA_DFLT': 'CALL_IMP_VOL_2M_25D',
+        '2M_PUT_IMP_VOL_25DELTA_DFLT': 'PUT_IMP_VOL_2M_25D',
+        'HIST_PUT_IMP_VOL': 'HIST_PUT_IMP_VOL',
+        'VOL_STDDEV': 'VOL_STDDEV',
+        'VOLATILITY_90D': 'VOLATILITY_90D',
+        'VOL_PERCENTILE': 'VOL_PERCENTILE',
+        'CHG_PCT_1YR': 'CHG_PCT_1YR',
+        'CORR_COEF': 'CORR_COEF',
+        'DIVIDEND_INDICATED_YIELD': 'DIVIDEND_YIELD'
+    }
+    df_iv = df_iv.rename(columns=column_mapping)
+
+    # 清理 BBG_Code - 移除 " Equity" 後綴
+    if 'BBG_Code' in df_iv.columns:
+        df_iv['BBG_Code'] = df_iv['BBG_Code'].astype(str).str.replace(' Equity', '', regex=False)
+        df_iv['BBG_Code'] = df_iv['BBG_Code'].str.replace(' US', '', regex=False)
+
+    # 轉換數值列
+    numeric_cols = ['PX_LAST', 'PUT_IMP_VOL_3M', 'CALL_IMP_VOL_2M_25D',
+                    'PUT_IMP_VOL_2M_25D', 'HIST_PUT_IMP_VOL', 'VOL_STDDEV',
+                    'VOLATILITY_90D', 'VOL_PERCENTILE', 'CHG_PCT_1YR',
+                    'CORR_COEF', 'DIVIDEND_YIELD']
+    for col in numeric_cols:
+        if col in df_iv.columns:
+            df_iv[col] = pd.to_numeric(df_iv[col], errors='coerce')
+
+    iv_cache[date_key] = df_iv
+    return df_iv
+
+
+def get_available_dates() -> List[str]:
+    """取得可用的IV資料日期"""
+    if not os.path.exists(IV_DATA_PATH):
+        return []
+
+    dates = []
+    for f in os.listdir(IV_DATA_PATH):
+        if f.endswith('.xlsx'):
+            dates.append(f.replace('.xlsx', ''))
+    return sorted(dates, reverse=True)
+
+
+def safe_float(value) -> float | None:
+    """安全轉換為 float，處理 NaN 和無效值"""
+    if pd.isna(value):
+        return None
+    try:
+        f = float(value)
+        if np.isnan(f) or np.isinf(f):
+            return None
+        return f
+    except (ValueError, TypeError):
+        return None
+
+
+def get_available_stocks(date_key: str) -> List[dict]:
+    """取得指定日期可用的股票清單"""
+    try:
+        df_iv = load_iv_data(date_key)
+        stocks = []
+        for _, row in df_iv.iterrows():
+            code = row['BBG_Code']
+            # 過濾掉無效的股票代碼
+            if not code or code == 'nan' or 'Index' in str(code):
+                continue
+            # 過濾掉沒有價格的記錄
+            price = safe_float(row['PX_LAST'])
+            if price is None:
+                continue
+            stocks.append({
+                'code': code,
+                'price': price,
+                'vol90d': safe_float(row['VOLATILITY_90D']),
+                'iv': safe_float(row['PUT_IMP_VOL_3M'])
+            })
+        return stocks
+    except Exception as e:
+        print(f"Error loading stocks: {e}")
+        return []
+
+
+# ============================================================================
+# Pydantic 模型
+# ============================================================================
+
+class FCNRequest(BaseModel):
+    stocks: List[str] = Field(..., min_items=1, max_items=3, description="股票代碼列表")
+    period: int = Field(..., ge=2, le=12, description="承作期間(月)")
+    strikePrice: float = Field(..., ge=50, le=100, description="轉換價(%)")
+    knockOutPrice: float = Field(..., ge=90, le=150, description="上限價(%)")
+    knockInPrice: float = Field(..., ge=50, le=95, description="保護價(%)")
+    kiType: str = Field(default="EKI", description="KI類型(AKI/EKI)")
+    customFeeRate: float = Field(default=99.0, ge=95, le=100, description="成本(%)")
+    pricingDate: Optional[str] = Field(default=None, description="定價日期(YYYYMMDD)")
+
+
+class FCNResponse(BaseModel):
+    annualized_yield: float
+    calibrated_yield: Optional[float] = None
+    model_used: str
+    has_calibration: bool
+    input_params: dict
+    market_params: dict
+    stock_info: dict
+
+
+class StockDetailsRequest(BaseModel):
+    symbols: List[str]
+
+
+# ============================================================================
+# 特徵工程函數
+# ============================================================================
+
+def compute_features(input_data: dict, iv_data_list: list) -> pd.DataFrame:
+    """計算所有特徵"""
+    features = {}
+
+    # 基本FCN條件特徵
+    features['Strike (%)'] = input_data['strike']
+    features['KO Barrier (%)'] = input_data['ko_barrier']
+    features['KI Barrier (%)'] = input_data['ki_barrier']
+    features['Tenor (m)'] = input_data['tenor']
+    features['Non-call Periods (m)'] = 1  # 預設1個月
+    features['Cost (%)'] = input_data['cost']
+    features['Barrier_Type_AKI'] = 1 if input_data['barrier_type'] == 'AKI' else 0
+
+    # 費用特徵
+    features['Fee'] = 100 - input_data['cost']
+    features['Annualized_Fee'] = features['Fee'] / input_data['tenor'] * 12
+
+    # 時間特徵
+    features['Tenor_Sqrt'] = np.sqrt(input_data['tenor'])
+    features['Tenor_Squared'] = input_data['tenor'] ** 2
+    features['Callable_Period'] = input_data['tenor'] - 1
+    features['Callable_Ratio'] = features['Callable_Period'] / input_data['tenor']
+    features['NonCall_Ratio'] = 1 / input_data['tenor']
+
+    # 障礙價特徵
+    features['KO_Strike_Distance'] = input_data['ko_barrier'] - input_data['strike']
+    features['Strike_KI_Distance'] = input_data['strike'] - input_data['ki_barrier']
+    features['KO_KI_Range'] = input_data['ko_barrier'] - input_data['ki_barrier']
+    features['KI_Strike_Ratio'] = input_data['ki_barrier'] / input_data['strike']
+    features['KO_Strike_Ratio'] = input_data['ko_barrier'] / input_data['strike']
+    features['KI_Distance_Pct'] = input_data['strike'] - input_data['ki_barrier']
+    features['KO_Distance_Pct'] = input_data['ko_barrier'] - input_data['strike']
+
+    # Basket特徵
+    basket_size = len([d for d in iv_data_list if d is not None])
+    features['Basket_Size'] = basket_size
+    features['Num_Underlyings'] = basket_size
+    features['Basket_Complexity_Factor'] = basket_size / 3.0
+
+    # 排序後的IV特徵
+    iv_cols_mapping = {
+        'PUT_IMP_VOL_3M': 'PUT_IMP_VOL_3M_Rank',
+        'CALL_IMP_VOL_2M_25D': 'CALL_IMP_VOL_2M_25D_Rank',
+        'PUT_IMP_VOL_2M_25D': 'PUT_IMP_VOL_2M_25D_Rank',
+        'HIST_PUT_IMP_VOL': 'HIST_PUT_IMP_VOL_Rank',
+        'VOL_STDDEV': 'VOL_STDDEV_Rank',
+        'VOLATILITY_90D': 'VOLATILITY_90D_Rank',
+        'VOL_PERCENTILE': 'VOL_PERCENTILE_Rank',
+        'CHG_PCT_1YR': 'CHG_PCT_1YR_Rank',
+        'CORR_COEF': 'CORR_COEF_Rank',
+        'DIVIDEND_YIELD': 'DIVIDEND_YIELD_Rank',
+        'PX_LAST': 'PX_LAST_Rank',
+    }
+
+    for orig_col, rank_prefix in iv_cols_mapping.items():
+        for i in range(3):
+            rank_col = f'{rank_prefix}_{i+1}'
+            if i < len(iv_data_list) and iv_data_list[i] is not None:
+                features[rank_col] = iv_data_list[i].get(orig_col, np.nan)
+            else:
+                features[rank_col] = np.nan
+
+    # IV Skew 和 Premium
+    for i in range(3):
+        if i < len(iv_data_list) and iv_data_list[i] is not None:
+            put_iv = iv_data_list[i].get('PUT_IMP_VOL_2M_25D', np.nan)
+            call_iv = iv_data_list[i].get('CALL_IMP_VOL_2M_25D', np.nan)
+            hist_iv = iv_data_list[i].get('VOLATILITY_90D', np.nan)
+            iv_3m = iv_data_list[i].get('PUT_IMP_VOL_3M', np.nan)
+
+            if pd.notna(put_iv) and pd.notna(call_iv):
+                features[f'IV_Skew_Rank_{i+1}'] = put_iv - call_iv
+            else:
+                features[f'IV_Skew_Rank_{i+1}'] = np.nan
+
+            if pd.notna(iv_3m) and pd.notna(hist_iv) and hist_iv != 0:
+                features[f'IV_Premium_Rank_{i+1}'] = (iv_3m - hist_iv) / hist_iv
+            else:
+                features[f'IV_Premium_Rank_{i+1}'] = np.nan
+        else:
+            features[f'IV_Skew_Rank_{i+1}'] = np.nan
+            features[f'IV_Premium_Rank_{i+1}'] = np.nan
+
+    # Basket聚合特徵
+    iv_values = [d.get('PUT_IMP_VOL_3M') for d in iv_data_list if d and pd.notna(d.get('PUT_IMP_VOL_3M'))]
+    hv_values = [d.get('VOLATILITY_90D') for d in iv_data_list if d and pd.notna(d.get('VOLATILITY_90D'))]
+    corr_values = [d.get('CORR_COEF') for d in iv_data_list if d and pd.notna(d.get('CORR_COEF'))]
+
+    features['IV_Spread'] = max(iv_values) - min(iv_values) if len(iv_values) >= 2 else 0
+    features['Basket_IV_Range'] = features['IV_Spread']
+
+    features['Basket_Avg_Corr'] = np.mean(corr_values) if corr_values else np.nan
+    features['Basket_Min_Corr'] = min(corr_values) if corr_values else np.nan
+    features['Max_Correlation'] = max(corr_values) if corr_values else np.nan
+    features['Min_Correlation'] = min(corr_values) if corr_values else np.nan
+
+    skew_values = [features.get(f'IV_Skew_Rank_{i+1}') for i in range(basket_size)
+                   if pd.notna(features.get(f'IV_Skew_Rank_{i+1}'))]
+    premium_values = [features.get(f'IV_Premium_Rank_{i+1}') for i in range(basket_size)
+                      if pd.notna(features.get(f'IV_Premium_Rank_{i+1}'))]
+
+    features['Basket_Avg_Skew'] = np.mean(skew_values) if skew_values else np.nan
+    features['Basket_Max_Skew'] = max(skew_values) if skew_values else np.nan
+    features['Basket_Avg_IV_Premium'] = np.mean(premium_values) if premium_values else np.nan
+    features['Basket_Max_IV_Premium'] = max(premium_values) if premium_values else np.nan
+
+    if iv_values and hv_values:
+        features['IV_HV_Ratio'] = np.mean(iv_values) / np.mean(hv_values)
+    else:
+        features['IV_HV_Ratio'] = np.nan
+
+    # 風險評分特徵
+    rank_1_iv = features.get('PUT_IMP_VOL_3M_Rank_1', np.nan)
+
+    if pd.notna(rank_1_iv):
+        features['Annualized_Vol_Factor'] = rank_1_iv / 100 * np.sqrt(input_data['tenor'] / 12)
+
+        if features['Annualized_Vol_Factor'] > 0:
+            features['KI_Distance_Std'] = features['KI_Distance_Pct'] / 100 / features['Annualized_Vol_Factor']
+            features['KO_Distance_Std'] = features['KO_Distance_Pct'] / 100 / features['Annualized_Vol_Factor']
+            features['KI_Distance_Std_Sorted'] = features['KI_Distance_Std']
+        else:
+            features['KI_Distance_Std'] = np.nan
+            features['KO_Distance_Std'] = np.nan
+            features['KI_Distance_Std_Sorted'] = np.nan
+
+        features['Annualized_Vol'] = rank_1_iv * np.sqrt(input_data['tenor'] / 12)
+
+        if pd.notna(features['Basket_Avg_Corr']) and basket_size > 1:
+            features['Corr_Adjusted_IV'] = rank_1_iv * (1 + 0.1 * (basket_size - 1) * (1 - features['Basket_Avg_Corr']))
+        else:
+            features['Corr_Adjusted_IV'] = rank_1_iv
+
+        features['KI_Risk_Score'] = (rank_1_iv / 43.5) * (input_data['ki_barrier'] / 100)
+        features['Basket_Risk_Score'] = features['KI_Risk_Score'] * (1 + 0.2 * (basket_size - 1))
+
+        if pd.notna(features['Basket_Avg_Corr']) and basket_size > 1:
+            features['Basket_Risk_Score'] *= (1 + 0.1 * (1 - features['Basket_Avg_Corr']))
+
+        features['Risk_Score_Sorted'] = (rank_1_iv / 52.4) * (input_data['ki_barrier'] / 100) * (1 + 0.2 * (basket_size - 1))
+    else:
+        for key in ['Annualized_Vol_Factor', 'KI_Distance_Std', 'KO_Distance_Std',
+                    'KI_Distance_Std_Sorted', 'Annualized_Vol', 'Corr_Adjusted_IV',
+                    'KI_Risk_Score', 'Basket_Risk_Score', 'Risk_Score_Sorted']:
+            features[key] = np.nan
+
+    features['Return_Potential'] = (input_data['ko_barrier'] / 100) * (input_data['tenor'] / 12)
+
+    return pd.DataFrame([features])
+
+
+# ============================================================================
+# API 端點
+# ============================================================================
+
+@app.on_event("startup")
+async def startup_event():
+    """應用啟動時載入模型"""
+    load_model()
+
+
+@app.get("/api/health")
+async def health_check():
+    """健康檢查"""
+    return {
+        "status": "healthy",
+        "model_available": model is not None,
+        "feature_count": len(feature_cols),
+        "available_dates": get_available_dates()[:5]
+    }
+
+
+@app.get("/api/stocks/available")
+async def get_stocks():
+    """取得可用股票清單"""
+    dates = get_available_dates()
+    if not dates:
+        raise HTTPException(status_code=404, detail="沒有可用的IV資料")
+
+    latest_date = dates[0]
+    stocks = get_available_stocks(latest_date)
+    return stocks
+
+
+@app.post("/api/stocks/details")
+async def get_stock_details(request: StockDetailsRequest):
+    """取得股票詳細資訊"""
+    dates = get_available_dates()
+    if not dates:
+        raise HTTPException(status_code=404, detail="沒有可用的IV資料")
+
+    latest_date = dates[0]
+    df_iv = load_iv_data(latest_date)
+
+    results = []
+    for symbol in request.symbols:
+        stock_data = df_iv[df_iv['BBG_Code'] == symbol]
+        if len(stock_data) > 0:
+            row = stock_data.iloc[0]
+            results.append({
+                'symbol': symbol,
+                'currentPrice': safe_float(row['PX_LAST']),
+                'vol_90d': safe_float(row['VOLATILITY_90D']),
+                'iv': safe_float(row['PUT_IMP_VOL_3M'])
+            })
+
+    return results
+
+
+@app.post("/api/fcn/calculate", response_model=FCNResponse)
+async def calculate_fcn(request: FCNRequest):
+    """計算FCN收益率"""
+    if model is None:
+        raise HTTPException(status_code=500, detail="模型未載入")
+
+    # 取得定價日期
+    dates = get_available_dates()
+    if not dates:
+        raise HTTPException(status_code=404, detail="沒有可用的IV資料")
+
+    pricing_date = request.pricingDate if request.pricingDate else dates[0]
+
+    # 驗證輸入
+    if request.knockInPrice >= request.strikePrice:
+        raise HTTPException(status_code=400, detail="保護價必須低於轉換價")
+    if request.knockOutPrice <= request.strikePrice:
+        raise HTTPException(status_code=400, detail="上限價必須高於轉換價")
+
+    try:
+        # 載入IV資料
+        df_iv = load_iv_data(pricing_date)
+
+        # 取得各標的的IV資料
+        iv_data_list = []
+        stock_info = {}
+
+        for bbg in request.stocks:
+            stock_data = df_iv[df_iv['BBG_Code'] == bbg]
+            if len(stock_data) > 0:
+                row = stock_data.iloc[0].to_dict()
+                iv_data_list.append(row)
+                stock_info[bbg] = {
+                    'price': safe_float(row['PX_LAST']),
+                    'put_iv_3m': safe_float(row['PUT_IMP_VOL_3M']),
+                    'vol_90d': safe_float(row['VOLATILITY_90D'])
+                }
+            else:
+                raise HTTPException(status_code=400, detail=f"找不到股票 {bbg} 的IV資料")
+
+        # 按PUT_IMP_VOL_3M降冪排序
+        iv_data_list.sort(key=lambda x: x.get('PUT_IMP_VOL_3M', 0) or 0, reverse=True)
+
+        # 填補到3個
+        while len(iv_data_list) < 3:
+            iv_data_list.append(None)
+
+        # 準備輸入資料
+        input_data = {
+            'strike': request.strikePrice,
+            'ko_barrier': request.knockOutPrice,
+            'ki_barrier': request.knockInPrice,
+            'tenor': request.period,
+            'cost': request.customFeeRate,
+            'barrier_type': request.kiType
+        }
+
+        # 計算特徵
+        features_df = compute_features(input_data, iv_data_list)
+
+        # 確保特徵順序正確
+        X = features_df.reindex(columns=feature_cols)
+
+        # 預測
+        predicted_coupon = safe_float(model.predict(X)[0])
+        if predicted_coupon is None:
+            predicted_coupon = 0.0
+
+        return FCNResponse(
+            annualized_yield=predicted_coupon,
+            calibrated_yield=predicted_coupon,
+            model_used="HistGradient Boosting (R²=0.92)",
+            has_calibration=True,
+            input_params={
+                'tenure_months': request.period,
+                'strike_pct': request.strikePrice,
+                'ko_barrier_pct': request.knockOutPrice,
+                'ki_barrier_pct': request.knockInPrice,
+                'ki_type': request.kiType,
+                'cost_pct': request.customFeeRate
+            },
+            market_params={
+                'pricing_date': pricing_date,
+                'SOFR_RATE': 5.0,
+                'VIX_INDEX': 15.0
+            },
+            stock_info=stock_info
+        )
+
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"計算錯誤: {str(e)}")
+
+
+@app.get("/api/dates/available")
+async def get_dates():
+    """取得可用的定價日期"""
+    return get_available_dates()
+
+
+# ============================================================================
+# 啟動伺服器
+# ============================================================================
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
