@@ -230,7 +230,7 @@ const FCNCalculatorV2: React.FC = () => {
                 <span className="font-medium">系統運行正常</span>
               </div>
               <div className="flex items-center gap-4 text-sm text-gray-600">
-                <span>模型狀態: {systemStatus.model_available ? 'XGBoost 已載入' : '基本模式'}</span>
+                <span>模型狀態: {systemStatus.model_available ? 'HistGradientBoosting 已載入' : '基本模式'}</span>
               </div>
             </div>
           </CardContent>
@@ -409,42 +409,16 @@ const FCNCalculatorV2: React.FC = () => {
               {results ? (
                 <div className="space-y-6">
                   {/* 主要收益率展示 */}
-                  <div className="flex justify-center gap-4">
-                    {/* 校準預測（主要） */}
-                    {results.has_calibration && results.calibrated_yield !== undefined ? (
-                      <div className="bg-gradient-to-r from-green-50 to-green-100 p-6 rounded-lg border border-green-200 w-64">
-                        <div className="text-center">
-                          <p className="text-4xl font-bold text-green-600">
-                            {results.calibrated_yield.toFixed(2)}%
-                          </p>
-                          <p className="text-base text-green-500 font-medium mt-2">校準後年化收益率</p>
-                          <p className="text-xs text-gray-500 mt-1">✓ 已校準</p>
-                        </div>
+                  <div className="flex justify-center">
+                    <div className="bg-gradient-to-r from-blue-50 to-indigo-100 p-8 rounded-lg border border-blue-200 w-72">
+                      <div className="text-center">
+                        <p className="text-5xl font-bold text-blue-600">
+                          {results.annualized_yield.toFixed(2)}%
+                        </p>
+                        <p className="text-base text-blue-500 font-medium mt-3">預測年化收益率</p>
+                        <p className="text-xs text-gray-500 mt-2">{results.model_used}</p>
                       </div>
-                    ) : (
-                      <div className="bg-gradient-to-r from-blue-50 to-blue-100 p-6 rounded-lg border border-blue-200 w-64">
-                        <div className="text-center">
-                          <p className="text-4xl font-bold text-blue-600">
-                            {results.annualized_yield.toFixed(2)}%
-                          </p>
-                          <p className="text-base text-blue-500 font-medium mt-2">年化收益率</p>
-                          <p className="text-xs text-gray-500 mt-1">模型: {results.model_used}</p>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* 原始預測（如果有校準） */}
-                    {results.has_calibration && results.calibrated_yield !== undefined && (
-                      <div className="bg-gradient-to-r from-gray-50 to-gray-100 p-6 rounded-lg border border-gray-200 w-64">
-                        <div className="text-center">
-                          <p className="text-3xl font-bold text-gray-600">
-                            {results.annualized_yield.toFixed(2)}%
-                          </p>
-                          <p className="text-base text-gray-500 font-medium mt-2">原始預測</p>
-                          <p className="text-xs text-gray-400 mt-1">{results.model_used}</p>
-                        </div>
-                      </div>
-                    )}
+                    </div>
                   </div>
 
                   <Separator />

@@ -2,11 +2,10 @@
 import { useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Calculator, TrendingUp, Package, ShoppingCart } from 'lucide-react';
+import { Calculator, TrendingUp, Package } from 'lucide-react';
 import FCNCalculatorV2 from '@/components/FCNCalculatorV2';
 import FCNAnalysis from '@/components/FCNAnalysis';
 import FCNRecommendations from '@/components/FCNRecommendations';
-import FCNProducts from '@/components/FCNProducts';
 
 const Index = () => {
   return (
@@ -26,7 +25,7 @@ const Index = () => {
       {/* Main Content */}
       <div className="max-w-7xl mx-auto px-4 py-8">
         <Tabs defaultValue="calculator" className="w-full">
-          <TabsList className="grid w-full grid-cols-4 mb-8">
+          <TabsList className="grid w-full grid-cols-3 mb-8">
             <TabsTrigger value="calculator" className="flex items-center gap-2">
               <Calculator className="h-4 w-4" />
               FCN 詢價試算
@@ -38,10 +37,6 @@ const Index = () => {
             <TabsTrigger value="recommendations" className="flex items-center gap-2">
               <Package className="h-4 w-4" />
               組合推薦
-            </TabsTrigger>
-            <TabsTrigger value="products" className="flex items-center gap-2">
-              <ShoppingCart className="h-4 w-4" />
-              募集中商品
             </TabsTrigger>
           </TabsList>
 
@@ -55,10 +50,6 @@ const Index = () => {
 
           <TabsContent value="recommendations">
             <FCNRecommendations />
-          </TabsContent>
-
-          <TabsContent value="products">
-            <FCNProducts />
           </TabsContent>
         </Tabs>
       </div>
