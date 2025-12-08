@@ -41,6 +41,7 @@ IV_DATA_PATH = "data/iv_data"
 model = None
 feature_cols = []
 iv_cache = {}
+market_indices_cache = {}
 
 
 def load_model():
@@ -65,7 +66,7 @@ def load_model():
 
 def load_iv_data(date_key: str) -> pd.DataFrame:
     """載入指定日期的IV資料"""
-    global iv_cache
+    global iv_cache, market_indices_cache
 
     if date_key in iv_cache:
         return iv_cache[date_key]
@@ -111,8 +112,27 @@ def load_iv_data(date_key: str) -> pd.DataFrame:
         if col in df_iv.columns:
             df_iv[col] = pd.to_numeric(df_iv[col], errors='coerce')
 
+    # 提取市場指數 (SOFR, VIX 等)
+    market_indices = {'SOFR_RATE': 5.0, 'VIX_INDEX': 15.0}  # 預設值
+    for _, row in df_iv.iterrows():
+        code = str(row['BBG_Code'])
+        price = safe_float(row['PX_LAST'])
+        if price is not None:
+            if 'SOFRRATE' in code or 'SOFR' in code:
+                market_indices['SOFR_RATE'] = price
+            elif 'VIX' in code:
+                market_indices['VIX_INDEX'] = price
+    market_indices_cache[date_key] = market_indices
+
     iv_cache[date_key] = df_iv
     return df_iv
+
+
+def get_market_indices(date_key: str) -> dict:
+    """取得指定日期的市場指數"""
+    if date_key not in market_indices_cache:
+        load_iv_data(date_key)
+    return market_indices_cache.get(date_key, {'SOFR_RATE': 5.0, 'VIX_INDEX': 15.0})
 
 
 def get_available_dates() -> List[str]:
@@ -491,8 +511,7 @@ async def calculate_fcn(request: FCNRequest):
             },
             market_params={
                 'pricing_date': pricing_date,
-                'SOFR_RATE': 5.0,
-                'VIX_INDEX': 15.0
+                **get_market_indices(pricing_date)
             },
             stock_info=stock_info
         )
