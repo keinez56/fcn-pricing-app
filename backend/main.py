@@ -199,6 +199,7 @@ class FCNRequest(BaseModel):
     kiType: str = Field(default="EKI", description="KI類型(AKI/EKI)")
     customFeeRate: float = Field(default=99.0, ge=95, le=100, description="成本(%)")
     pricingDate: Optional[str] = Field(default=None, description="定價日期(YYYYMMDD)")
+    nonCallPeriods: Optional[int] = Field(default=1, ge=1, le=12, description="閉鎖期(月)")
 
 
 class FCNResponse(BaseModel):
@@ -228,9 +229,12 @@ def compute_features(input_data: dict, iv_data_list: list) -> pd.DataFrame:
     features['KO Barrier (%)'] = input_data['ko_barrier']
     features['KI Barrier (%)'] = input_data['ki_barrier']
     features['Tenor (m)'] = input_data['tenor']
-    features['Non-call Periods (m)'] = 1  # 預設1個月
+    features['Non-call Periods (m)'] = input_data.get('non_call_periods', 1)
     features['Cost (%)'] = input_data['cost']
     features['Barrier_Type_AKI'] = 1 if input_data['barrier_type'] == 'AKI' else 0
+
+    # No KO Flag (當 Non-call == Tenor 時，不會觸發 KO)
+    features['No_KO_Flag'] = 1 if features['Non-call Periods (m)'] == input_data['tenor'] else 0
 
     # 費用特徵
     features['Fee'] = 100 - input_data['cost']
@@ -239,9 +243,9 @@ def compute_features(input_data: dict, iv_data_list: list) -> pd.DataFrame:
     # 時間特徵
     features['Tenor_Sqrt'] = np.sqrt(input_data['tenor'])
     features['Tenor_Squared'] = input_data['tenor'] ** 2
-    features['Callable_Period'] = input_data['tenor'] - 1
+    features['Callable_Period'] = input_data['tenor'] - features['Non-call Periods (m)']
     features['Callable_Ratio'] = features['Callable_Period'] / input_data['tenor']
-    features['NonCall_Ratio'] = 1 / input_data['tenor']
+    features['NonCall_Ratio'] = features['Non-call Periods (m)'] / input_data['tenor']
 
     # 障礙價特徵
     features['KO_Strike_Distance'] = input_data['ko_barrier'] - input_data['strike']
@@ -476,13 +480,18 @@ async def calculate_fcn(request: FCNRequest):
             iv_data_list.append(None)
 
         # 準備輸入資料
+        non_call = request.nonCallPeriods if request.nonCallPeriods else 1
+        # 確保 non_call 不超過 tenor
+        non_call = min(non_call, request.period)
+
         input_data = {
             'strike': request.strikePrice,
             'ko_barrier': request.knockOutPrice,
             'ki_barrier': request.knockInPrice,
             'tenor': request.period,
             'cost': request.customFeeRate,
-            'barrier_type': request.kiType
+            'barrier_type': request.kiType,
+            'non_call_periods': non_call
         }
 
         # 計算特徵
@@ -507,7 +516,9 @@ async def calculate_fcn(request: FCNRequest):
                 'ko_barrier_pct': request.knockOutPrice,
                 'ki_barrier_pct': request.knockInPrice,
                 'ki_type': request.kiType,
-                'cost_pct': request.customFeeRate
+                'cost_pct': request.customFeeRate,
+                'non_call_periods': non_call,
+                'no_ko': non_call == request.period
             },
             market_params={
                 'pricing_date': pricing_date,

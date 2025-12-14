@@ -29,6 +29,7 @@ const FCNCalculatorV2: React.FC = () => {
   // 狀態管理
   const [selectedStocks, setSelectedStocks] = useState<string[]>([]);
   const [period, setPeriod] = useState<string>('');
+  const [nonCallPeriods, setNonCallPeriods] = useState<string>('1');
   const [strikePrice, setStrikePrice] = useState<string>('');
   const [knockOutPrice, setKnockOutPrice] = useState<string>('');
   const [knockInPrice, setKnockInPrice] = useState<string>('');
@@ -88,12 +89,23 @@ const FCNCalculatorV2: React.FC = () => {
     const ki = parseFloat(knockInPrice);
     const months = parseInt(period);
     const costValue = parseFloat(cost);
+    const nonCall = parseInt(nonCallPeriods);
 
     // 檢查承作期間 (2-12個月)
     if (months < 2 || months > 12) {
       toast({
         title: "期間錯誤",
         description: "承作期間應在 2-12 個月之間",
+        variant: "destructive"
+      });
+      return false;
+    }
+
+    // 檢查閉鎖期 (1-承作期間)
+    if (nonCall < 1 || nonCall > months) {
+      toast({
+        title: "閉鎖期錯誤",
+        description: `閉鎖期應在 1-${months} 個月之間`,
         variant: "destructive"
       });
       return false;
@@ -171,6 +183,7 @@ const FCNCalculatorV2: React.FC = () => {
       const requestData = {
         stocks: selectedStocks,
         period: parseFloat(period),
+        nonCallPeriods: parseInt(nonCallPeriods),
         strikePrice: parseFloat(strikePrice),
         knockOutPrice: parseFloat(knockOutPrice),
         knockInPrice: parseFloat(knockInPrice),
@@ -261,19 +274,49 @@ const FCNCalculatorV2: React.FC = () => {
             </CardHeader>
             <CardContent className="p-6 space-y-4">
               {/* 期間設定 */}
-              <div>
-                <Label htmlFor="period">承作期間 (月)</Label>
-                <Input
-                  id="period"
-                  type="number"
-                  placeholder="6"
-                  value={period}
-                  onChange={(e) => setPeriod(e.target.value)}
-                  min="2"
-                  max="12"
-                  disabled={isCalculating}
-                />
-                <p className="text-xs text-gray-500 mt-1">承作規定: 2-12 個月</p>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="period">承作期間 (月)</Label>
+                  <Input
+                    id="period"
+                    type="number"
+                    placeholder="6"
+                    value={period}
+                    onChange={(e) => {
+                      setPeriod(e.target.value);
+                      // 如果閉鎖期大於承作期間，自動調整
+                      const newPeriod = parseInt(e.target.value);
+                      const currentNonCall = parseInt(nonCallPeriods);
+                      if (currentNonCall > newPeriod) {
+                        setNonCallPeriods(e.target.value);
+                      }
+                    }}
+                    min="2"
+                    max="12"
+                    disabled={isCalculating}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">範圍: 2-12 個月</p>
+                </div>
+                <div>
+                  <Label htmlFor="nonCallPeriods">閉鎖期 (月)</Label>
+                  <Input
+                    id="nonCallPeriods"
+                    type="number"
+                    placeholder="1"
+                    value={nonCallPeriods}
+                    onChange={(e) => setNonCallPeriods(e.target.value)}
+                    min="1"
+                    max={period || "12"}
+                    disabled={isCalculating}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    {parseInt(nonCallPeriods) === parseInt(period) && period ? (
+                      <span className="text-amber-600 font-medium">⚠️ 閉鎖期=承作期間，不會觸發 KO</span>
+                    ) : (
+                      `範圍: 1-${period || '?'} 個月`
+                    )}
+                  </p>
+                </div>
               </div>
 
               {/* 價格參數 */}
@@ -436,6 +479,17 @@ const FCNCalculatorV2: React.FC = () => {
                       <p className="font-medium">{results.input_params.tenure_months} 個月</p>
                     </div>
                     <div>
+                      <p className="text-gray-600">閉鎖期</p>
+                      <p className="font-medium">
+                        {results.input_params.non_call_periods} 個月
+                        {results.input_params.no_ko && (
+                          <Badge variant="outline" className="ml-2 text-amber-600 border-amber-300">
+                            不觸發KO
+                          </Badge>
+                        )}
+                      </p>
+                    </div>
+                    <div>
                       <p className="text-gray-600">轉換價 (Strike)</p>
                       <p className="font-medium">{results.input_params.strike_pct}%</p>
                     </div>
@@ -445,7 +499,12 @@ const FCNCalculatorV2: React.FC = () => {
                     </div>
                     <div>
                       <p className="text-gray-600">上限價 (KO)</p>
-                      <p className="font-medium">{results.input_params.ko_barrier_pct}%</p>
+                      <p className="font-medium">
+                        {results.input_params.ko_barrier_pct}%
+                        {results.input_params.no_ko && (
+                          <span className="text-gray-400 text-xs ml-1">(無效)</span>
+                        )}
+                      </p>
                     </div>
                     <div>
                       <p className="text-gray-600">KI 類型</p>
